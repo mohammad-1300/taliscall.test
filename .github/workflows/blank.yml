@@ -9,20 +9,43 @@ jobs:
     timeout-minutes: 355
 
     steps:
+
       - name: Enable RDP
         shell: powershell
         run: |
           Set-ItemProperty `
             -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' `
-            -Name fDenyTSConnections -Value 0
+            -Name fDenyTSConnections `
+            -Value 0
 
-          Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
+          Set-Service `
+            -Name TermService `
+            -StartupType Automatic
+
+          Start-Service `
+            -Name TermService
+
+          Enable-NetFirewallRule `
+            -DisplayGroup "Remote Desktop"
+
+          Set-ItemProperty `
+            -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
+            -Name UserAuthentication `
+            -Value 0
+
+          Write-Host "RDP enabled."
 
       - name: Create RDP User
         shell: powershell
         run: |
-          $password = -join ((33..126) | Get-Random -Count 20 | ForEach-Object {[char]$_})
-          $secure = ConvertTo-SecureString $password -AsPlainText -Force
+          $password = -join ((33..126) | Get-Random -Count 20 | ForEach-Object {
+            [char]$_
+          })
+
+          $secure = ConvertTo-SecureString `
+            $password `
+            -AsPlainText `
+            -Force
 
           New-LocalUser `
             -Name "rdpuser" `
@@ -30,10 +53,17 @@ jobs:
             -PasswordNeverExpires `
             -AccountNeverExpires
 
-          Add-LocalGroupMember -Group "Administrators" -Member "rdpuser"
-          Add-LocalGroupMember -Group "Remote Desktop Users" -Member "rdpuser"
+          Add-LocalGroupMember `
+            -Group "Administrators" `
+            -Member "rdpuser"
+
+          Add-LocalGroupMember `
+            -Group "Remote Desktop Users" `
+            -Member "rdpuser"
 
           "RDP_PASSWORD=$password" >> $env:GITHUB_ENV
+
+          Write-Host "RDP user created."
 
       - name: Install Tailscale
         shell: powershell
@@ -42,9 +72,12 @@ jobs:
             "https://pkgs.tailscale.com/stable/tailscale-setup-latest-amd64.msi" `
             -OutFile "$env:TEMP\tailscale.msi"
 
-          Start-Process msiexec.exe `
+          Start-Process `
+            msiexec.exe `
             -ArgumentList "/i `"$env:TEMP\tailscale.msi`" /quiet /norestart" `
             -Wait
+
+          Write-Host "Tailscale installed."
 
       - name: Connect to Tailscale
         shell: powershell
@@ -53,21 +86,85 @@ jobs:
         run: |
           & "$env:ProgramFiles\Tailscale\tailscale.exe" up `
             --authkey="$env:TS_AUTHKEY" `
-            --hostname="github-rdp-server"
+            --hostname="github-rdp-server" `
+            --unattended=true
 
-          Start-Sleep -Seconds 5
+          Start-Sleep -Seconds 10
 
-      - name: Show RDP Information
+          Write-Host "===== TAILSCALE STATUS ====="
+          & "$env:ProgramFiles\Tailscale\tailscale.exe" status
+
+      - name: Diagnose RDP
         shell: powershell
         run: |
-          $ip = & "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4
+          Write-Host "========================================"
+          Write-Host "        TERMINAL SERVICES"
+          Write-Host "========================================"
 
-          Write-Host "================================"
-          Write-Host "TAILSCALE IP: $ip"
-          Write-Host "RDP PORT: 3389"
-          Write-Host "USERNAME: rdpuser"
-          Write-Host "PASSWORD: $env:RDP_PASSWORD"
-          Write-Host "================================"
+          Get-Service TermService |
+            Format-List Status, StartType, Name, DisplayName
+
+          Write-Host ""
+          Write-Host "========================================"
+          Write-Host "        RDP REGISTRY"
+          Write-Host "========================================"
+
+          Get-ItemProperty `
+            'HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server' `
+            -Name fDenyTSConnections
+
+          Write-Host ""
+          Write-Host "========================================"
+          Write-Host "        3389 LISTENER"
+          Write-Host "========================================"
+
+          Get-NetTCPConnection `
+            -LocalPort 3389 `
+            -State Listen `
+            -ErrorAction SilentlyContinue |
+            Format-Table LocalAddress, LocalPort, State, OwningProcess
+
+          Write-Host ""
+          Write-Host "========================================"
+          Write-Host "        NETSTAT"
+          Write-Host "========================================"
+
+          netstat -ano | findstr ":3389"
+
+          Write-Host ""
+          Write-Host "========================================"
+          Write-Host "        LOCAL TCP TEST"
+          Write-Host "========================================"
+
+          Test-NetConnection 127.0.0.1 -Port 3389
+
+          Write-Host ""
+          Write-Host "========================================"
+          Write-Host "        FIREWALL RULES"
+          Write-Host "========================================"
+
+          Get-NetFirewallRule `
+            -DisplayGroup "Remote Desktop" |
+            Where-Object Enabled -eq "True" |
+            Format-Table DisplayName, Profile, Action, Enabled
+
+          Write-Host ""
+          Write-Host "========================================"
+          Write-Host "        TAILSCALE IP"
+          Write-Host "========================================"
+
+          $ip = (& "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4).Trim()
+
+          Write-Host "TAILSCALE_IP=$ip"
+          Write-Host "RDP_PORT=3389"
+          Write-Host "USERNAME=rdpuser"
+
+          Write-Host ""
+          Write-Host "========================================"
+          Write-Host "        CONNECTION INFO"
+          Write-Host "========================================"
+
+          Write-Host "RDP ADDRESS: $ip`:3389"
 
       - name: Keep Server Alive
         shell: powershell
